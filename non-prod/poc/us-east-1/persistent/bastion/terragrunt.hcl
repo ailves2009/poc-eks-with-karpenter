@@ -30,9 +30,11 @@ inputs = {
 
   # No Route53 record — DNS lives outside this account.
   # After apply, take the bastion's `public_ip` output and CNAME it
-  # manually in your authoritative zone (e.g. ailves2009.com).
+  # manually in your authoritative zone (e.g. example.com).
   create_dns_record = false
 
-  # Lock down to your office/home IP.
-  allowed_cidrs = ["109.121.55.63/32"]
+  # Lock down to your office/home IP. Find with `curl ifconfig.me`.
+  # The placeholder below is intentionally invalid — apply will fail until
+  # you replace it with a real CIDR.
+  allowed_cidrs = ["YOUR.PUBLIC.IP.HERE/32"]
 }

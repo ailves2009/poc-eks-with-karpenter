@@ -3,14 +3,15 @@
 # Set account-wide variables. These are automatically pulled in to configure the remote state bucket in the root
 # terragrunt.hcl configuration.
 locals {
-  aws_account_id          = "470201305353"
+  # Replace with your AWS account ID before first apply.
+  aws_account_id          = "111122223333"
   account_name            = "poc"
   env                     = "plt"
   client                  = "poc"
-  # Placeholder. POC does not own a delegated DNS zone in this account
-  # (corp domain echotwin.xyz isn't delegated; ailves2009.com is in another
-  # account; cross-account delegation is in TODO). Used as suffix for the
-  # nginx Ingress hostname — tested via `curl --resolve`.
+  # Placeholder. The POC does not own a Route53 zone in this account, so
+  # this value is only used as a Host-header suffix for the nginx Ingress
+  # rule (tested via `curl --resolve`). Replace with a domain you control
+  # if you want real DNS resolution + ACM. See README → "Before you start".
   domain_name             = "poc-eks-karpenter.domain.xyz"
   cicd_role_name          = "cicd-deployment-role"
   s3_terraform_state      = "nyd-plt-tf-state"

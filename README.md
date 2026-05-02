@@ -4,6 +4,21 @@ Terragrunt-based infrastructure for a production-oriented EKS cluster with Karpe
 
 ---
 
+## ⚠️ Before you do ANYTHING — replace these placeholders
+
+The repo ships with placeholder values that are intentionally invalid. `apply` will fail until each is replaced.
+
+| File | Placeholder | Replace with |
+|---|---|---|
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `aws_account_id = "111122223333"` | your AWS account ID |
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `s3_terraform_state = "nyd-plt-tf-state"` | a globally-unique S3 bucket name |
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `domain_name = "poc-eks-karpenter.domain.xyz"` | a domain you control (used as Ingress Host header; not actually resolved in the POC) |
+| [`non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl`](non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl) | `allowed_cidrs = ["YOUR.PUBLIC.IP.HERE/32"]` | your office/home IP — `curl ifconfig.me` |
+
+You also need an AWS CLI profile `ae-nyd-plt-init` configured with an IAM user that can bootstrap (create IAM roles, S3 bucket, KMS key). See [Prerequisites](#prerequisites) for details.
+
+---
+
 ## Project structure
 
 ```
@@ -88,7 +103,7 @@ resource "aws_iam_role" "example" {
 - Terraform >= 1.10 (or OpenTofu >= 1.8).
 - Terragrunt >= 0.69.
 - `kubectl`, `helm` (for cluster operations later).
-- **DNS for the demo Ingress**: external. The nginx Ingress matches Host header = the value in `local.hostname` in `workload/nginx/terragrunt.hcl` (POC default: `nginx.poc.ailves2009.com`). After `apply`, get the ALB DNS from `kubectl get ingress -n demo nginx` and create a CNAME `<hostname>` → `<ALB DNS>` in whatever Route53 zone you own. **No Route53 zone is created in this account.** For prod replace this with delegated zone + ACM cert.
+- **DNS for the demo Ingress**: external. The nginx Ingress matches Host header = `nginx.${var.domain_name}`. After `apply`, get the ALB DNS from `kubectl get ingress -n demo nginx` and create a CNAME in whatever Route53 zone you own — or test via `curl --resolve` (see Testing methodology). **No Route53 zone is created in this account.**
 
 The `terraform` IAM user needs permissions to bootstrap: create the IAM role, the boundary policy, and the S3 bucket. After bootstrap, the user is only ever used to assume `cicd-deployment-role`.
 
@@ -146,7 +161,7 @@ Two AWS CLI profiles are used in this project:
 region = us-east-1
 
 [profile ae-nyd-plt-target]
-role_arn       = arn:aws:iam::470201305353:role/cicd-deployment-role
+role_arn       = arn:aws:iam::111122223333:role/cicd-deployment-role
 source_profile = ae-nyd-plt-init
 region         = us-east-1
 ```
@@ -217,7 +232,7 @@ curl -sI --resolve "$HOST:80:$ALB_IP" "http://$HOST/"
 
 Why this works: `--resolve` overrides DNS for `$HOST`. ALB receives the request with `Host: $HOST` header, the listener rule matches `host-header == $HOST`, traffic forwards to the nginx target group. Same path a real CNAME would take, just resolved client-side.
 
-For a permanent setup (so `curl http://$HOST/` works without `--resolve`): add a CNAME `$HOST → $ALB` in your authoritative zone. In this POC that lives in another AWS account (`ailves2009.com`); the cross-account automation is a TODO.
+For a permanent setup (so `curl http://$HOST/` works without `--resolve`): add a CNAME `$HOST → $ALB` in your authoritative zone. In this POC that lives in another AWS account (`example.com`); the cross-account automation is a TODO.
 
 If anything fails, check the relevant component's logs:
 ```bash
@@ -404,7 +419,7 @@ Later, after the bastion + VPN are validated, you can flip `endpoint_public_acce
 
 ### DNS
 
-`create_dns_record = false` by default — the project doesn't manage Route53 in this account. Take `public_ip` from the module output and add a CNAME / A record manually in your authoritative zone (e.g. `bastion.poc.ailves2009.com`).
+`create_dns_record = false` by default — the project doesn't manage Route53 in this account. Take `public_ip` from the module output and add a CNAME / A record manually in your authoritative zone (e.g. `bastion.poc.example.com`).
 
 ### Connecting
 
@@ -493,8 +508,8 @@ For long-term, switch to alternative charts (NGINX Inc, custom) or self-hosted i
 ## TODO
 
 - **Karpenter chart vendored locally**. The chart `oci://public.ecr.aws/karpenter/karpenter` is pre-pulled into `modules/karpenter/charts/karpenter-<version>.tgz` and committed. Done because `helm provider v3` re-authenticates against OCI on every `plan`, and the auth token (TTL 12h from `data.aws_ecrpublic_authorization_token`) frequently fails with `403 expired` on subsequent applies. To bump the chart version: `helm pull oci://public.ecr.aws/karpenter/karpenter --version <X.Y.Z> --destination modules/karpenter/charts/`, update `var.karpenter_chart_version`, commit. Runtime image pulls (`public.ecr.aws/karpenter/controller`) are anonymous and unaffected. Tracked at https://github.com/hashicorp/terraform-provider-helm
-- **Cross-account DNS automation**. The authoritative zone (`ailves2009.com`) is in a different AWS account from where the workload runs. Currently the operator manually adds CNAMEs. Two options to automate: (a) cross-account IAM trust — give this account a role in the DNS account that lets it `route53:ChangeResourceRecordSets` on `*.poc.ailves2009.com`; deploy `external-dns` here pointing at that role. (b) `external-dns` running in DNS account, watching the workload account's resources via cross-account read of LB addresses. (a) is more idiomatic. Once done, drop `--resolve` from the test methodology and use `curl http://$HOST/` directly.
-- **HTTPS / ACM cert + real domain**. Currently the demo Ingress on nginx is **HTTP-only**. The corp domain `nyd-plt.echotwin.xyz` is not delegated to this AWS account (parent zone is corporate-managed), and the alternate domain `ailves2009.com` lives in another AWS account. So ACM DNS-validation can't complete in this account. To enable HTTPS for prod: either (a) cross-account delegate a subdomain to this account's Route53 (e.g. `poc.ailves2009.com` → NS records), then re-enable `persistent/acm` and HTTPS listener in `nginx/terragrunt.hcl`, or (b) provision the cert externally and import via `aws_acm_certificate.import_*`. `modules/acm/` is already written and reusable.
+- **Cross-account DNS automation**. The authoritative zone (`example.com`) is in a different AWS account from where the workload runs. Currently the operator manually adds CNAMEs. Two options to automate: (a) cross-account IAM trust — give this account a role in the DNS account that lets it `route53:ChangeResourceRecordSets` on `*.poc.example.com`; deploy `external-dns` here pointing at that role. (b) `external-dns` running in DNS account, watching the workload account's resources via cross-account read of LB addresses. (a) is more idiomatic. Once done, drop `--resolve` from the test methodology and use `curl http://$HOST/` directly.
+- **HTTPS / ACM cert + real domain**. The demo Ingress on nginx is **HTTP-only**. ACM DNS-validation requires the cert's domain to be delegated to a Route53 zone in this AWS account; in the original POC neither candidate domain qualified (corp parent zone wasn't delegate-able; the personal alternative lived in a different AWS account). To enable HTTPS for prod: either (a) cross-account delegate a subdomain to this account's Route53 (NS records pointing at this account's nameservers), then re-enable `persistent/acm` and add the HTTPS listener back to `nginx/terragrunt.hcl`, or (b) provision the cert externally and import via `aws_acm_certificate.import_*`. `modules/acm/` is already written and reusable.
 - Bumping bootstrap node group `min_size`/`desired_size` after first apply requires a manual `aws eks update-nodegroup-config` because the upstream module (`terraform-aws-modules/eks/aws`) `ignore_changes = [scaling_config[0].desired_size]` on the managed NG. Workflow: AWS CLI to raise desired, then `terragrunt apply` for min/max. Document or wrap this in a small helper if it becomes routine.
 - **Bastion SSM agent registration**. After `persistent/bastion` apply the SSM agent stays `Offline` (PingStatus empty). Reboot did not help. cloud-init initially failed on a `dnf -y update` curl/curl-minimal conflict — fixed in the script, but the agent never registered even on the rebuilt instance. Investigate: AL2023-arm64 AMI agent state, IMDSv2 + SG egress to `ssm.<region>.amazonaws.com` / `ec2messages.<region>` / `ssmmessages.<region>` (we allow all egress so should be fine), `sudo systemctl status amazon-ssm-agent` once we have any other path in. Workaround until fixed: SSH key access (would need to add `key_name` to the EC2 resource) or AWS Systems Manager → Fleet Manager remote shell from console.
 - `workload/external-dns` (optional — auto-creates Route53 records for Service/Ingress). Limited utility while DNS is in another account; would need cross-account write permissions.

@@ -24,4 +24,9 @@ out/
 
 # Lambda deployment packages
 *.zip
-bootstrap
+
+# Local secrets / scratch files
+*.ovpn
+kubeconfig*
+.envrc
+.direnv/

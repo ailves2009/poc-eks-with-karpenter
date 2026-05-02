@@ -9,13 +9,13 @@ output "wildcard_certificate_arn" {
 output "cloudwatch_alarm_arn" {
   description = "ARN of the CloudWatch alarm for certificate expiry"
   value       = var.enable_monitoring ? aws_cloudwatch_metric_alarm.certificate_expiry[0].arn : null
-  # arn:aws:cloudwatch:eu-west-3:470201305353:alarm:acm-certificate-expiry-poc-eks-karpenter-domain-xyz
+  # arn:aws:cloudwatch:eu-west-3:111122223333:alarm:acm-certificate-expiry-poc-eks-karpenter-domain-xyz
 }
 
 output "sns_topic_arn" {
   description = "ARN of the SNS topic for certificate alerts"
   value       = var.create_sns_topic && length(var.alarm_email) > 0 ? aws_sns_topic.certificate_alerts[0].arn : null
-  # arn:aws:sns:eu-west-3:470201305353:acm-certificates
+  # arn:aws:sns:eu-west-3:111122223333:acm-certificates
 }
 
 output "dashboard_url" {
@@ -27,5 +27,5 @@ output "dashboard_url" {
 output "aws_cloudwatch_metric_alarm-certificate_critical_expiry" {
   description = "CloudWatch alarm for critical certificate expiry"
   value       = var.enable_monitoring ? aws_cloudwatch_metric_alarm.certificate_critical_expiry[0].alarm_actions : null
-  # arn:aws:sns:eu-west-3:470201305353:acm-certificates
+  # arn:aws:sns:eu-west-3:111122223333:acm-certificates
 }
