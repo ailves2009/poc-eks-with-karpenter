@@ -48,13 +48,3 @@ remote_state {
 }
 
 iam_role = "arn:aws:iam::${local.account_id}:role/${local.cicd_role_name}"
-
-# Configure what repositories to search when you run 'terragrunt catalog'
-catalog {
-  urls = [
-    "https://github.com/gruntwork-io/terragrunt-infrastructure-catalog-example",
-    "https://github.com/gruntwork-io/terraform-aws-utilities",
-    "https://github.com/gruntwork-io/terraform-kubernetes-namespace"
-  ]
-}
-
