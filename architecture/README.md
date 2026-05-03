@@ -22,6 +22,33 @@ Cloud architecture proposal for a Python/Flask + React + PostgreSQL web applicat
 
 ---
 
+## Architecture principles
+
+Five rules that apply to every choice in this document. When two options compete, the one that respects more principles wins.
+
+1. **Managed services first.** Buy don't build while the team is <20 engineers. Self-host only when the managed option doesn't exist or is genuinely insufficient — not because it's "interesting".
+2. **No long-lived credentials, anywhere.** SSO for humans (Identity Center), OIDC for CI (GitHub → AWS), IRSA for pods. If a static access key has to exist, it's a smell — write down why.
+3. **Blast radius is isolated by account, not by IAM.** Cross-environment separation lives in the AWS Org boundary. IAM policies inside an account are the second line of defence, not the first.
+4. **Every choice must be additive.** What we deploy in Phase 1 must still be load-bearing in Phase 5 — no rip-and-replace migrations on the roadmap. If a decision can't survive 10× growth, it's the wrong decision.
+5. **Cost-aware by default, not as a later optimization.** Spot, Graviton, VPC endpoints, distroless images, multi-arch builds — all in from day 1. Cost optimization done after launch costs 5× more than doing it right the first time.
+
+---
+
+## Stakeholders and concerns
+
+Different audiences read this architecture for different reasons. The design tries to serve all four; if you're reading this as one of them, jump to the column that's yours.
+
+| Stakeholder | Primary concerns | Where the architecture answers them |
+|---|---|---|
+| **Engineering** (5 devs, day-to-day) | Deploy velocity, low ops overhead, multi-arch builds, fast feedback loops, no on-call surprises | Managed EKS + Karpenter, GitOps with Argo CD, distroless images, multi-arch buildx, IRSA replacing static creds |
+| **Security & Compliance** (likely future hire / fractional CISO) | SOC 2 readiness, PII protection, audit trail integrity, secret hygiene, supply-chain provenance | Org-wide CloudTrail to immutable `log-archive`, GuardDuty/Security Hub/Macie, KMS CMKs per data class, Secrets Manager + IAM DB auth, cosign + Sigstore policy-controller |
+| **Finance / Founders** | Predictable spend, no surprise bills, clear cost-per-environment attribution, scaling cost stays sub-linear | Per-account billing (no tag discipline required), Spot+Graviton baseline, Aurora Serverless v2 in non-prod, Savings Plans path, monthly cost estimate in §7 |
+| **Product / Business** | Uptime SLO, fast time-to-feature, ability to grow internationally, no architectural rewrites blocking growth | 99.9% SLO with clear path to 99.95%+, CI/CD with canary rollouts, additive 6-phase roadmap (§8), CloudFront global edge, Aurora Global DB option for international |
+
+The trade-offs noted in §9 are the places where one stakeholder's concern was deliberately weighed against another's — usually engineering velocity vs security posture, or feature speed vs cost discipline.
+
+---
+
 ## Scope and assumptions
 
 - **Workload class**: standard CRUD-heavy SaaS — Flask REST API + React SPA + Postgres. No real-time/streaming/ML at this stage.
