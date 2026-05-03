@@ -57,7 +57,7 @@ module "eks" {
   eks_managed_node_groups = {
     bootstrap = {
       ami_type       = "AL2023_ARM_64_STANDARD"
-      instance_types = var.bootstrap_node_instance_types
+      instance_types = var.bootstrap_node_instance_types # Graviton2-based, 2 vCPU and 4 GB RAM. Adjust based on your workload needs.
 
       min_size     = var.bootstrap_node_min_size
       max_size     = var.bootstrap_node_max_size

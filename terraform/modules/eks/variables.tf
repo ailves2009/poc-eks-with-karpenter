@@ -47,7 +47,7 @@ variable "permissions_boundary_arn" {
 variable "bootstrap_node_instance_types" {
   description = "Instance types for the bootstrap managed node group. Karpenter pods themselves run on these nodes — keep at least one alive."
   type        = list(string)
-  default     = ["t4g.medium"]
+  default     = ["t4g.medium"] # Graviton2-based, 2 vCPU and 4 GB RAM. Adjust based on your workload needs.
 }
 
 variable "bootstrap_node_min_size" {

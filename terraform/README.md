@@ -1,0 +1,618 @@
+# POC — AWS EKS with Karpenter (Graviton + Spot)
+
+Terragrunt-based infrastructure for a production-oriented EKS cluster with Karpenter autoscaling, multi-architecture (x86_64 + arm64) and Spot-first capacity strategy.
+
+---
+
+## ⚠️ Before you do ANYTHING — replace these placeholders
+
+The repo ships with placeholder values that are intentionally invalid. `apply` will fail until each is replaced.
+
+| File | Placeholder | Replace with |
+|---|---|---|
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `aws_account_id = "111122223333"` | your AWS account ID |
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `s3_terraform_state = "nyd-plt-tf-state"` | a globally-unique S3 bucket name |
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `domain_name = "poc-eks-karpenter.domain.xyz"` | a domain you control (used as Ingress Host header; not actually resolved in the POC) |
+| [`non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl`](non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl) | `allowed_cidrs = ["YOUR.PUBLIC.IP.HERE/32"]` | your office/home IP — `curl ifconfig.me` |
+
+You also need an AWS CLI profile `ae-nyd-plt-init` configured with an IAM user that can bootstrap (create IAM roles, S3 bucket, KMS key). See [Prerequisites](#prerequisites) for details.
+
+---
+
+## Running workloads on x86 / Graviton (end-user guide)
+
+The cluster's Karpenter [`NodePool`](modules/karpenter/main.tf) advertises **both `amd64` and `arm64`** as allowed architectures and prefers Spot. As a developer you don't manage nodes — you just submit a pod, and Karpenter picks the cheapest instance whose architecture, CPU, and memory satisfy your spec.
+
+You control architecture in two places: the **container image** (must be built for that arch) and the **pod's `nodeSelector` / `nodeAffinity`** (tells the scheduler what to ask for). If those don't match, the pod stays `Pending`.
+
+### Pin to Graviton (arm64)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-arm64
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: hello-arm64 } }
+  template:
+    metadata: { labels: { app: hello-arm64 } }
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      containers:
+        - name: app
+          image: public.ecr.aws/docker/library/nginx:alpine   # multi-arch manifest
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+```
+
+### Pin to x86_64 (amd64)
+
+Identical, but `kubernetes.io/arch: amd64`.
+
+### Multi-arch (let Karpenter choose the cheapest Spot)
+
+Drop the `nodeSelector` entirely. The pod becomes schedulable on either arch, and Karpenter will provision whichever Spot instance type wins the price/availability lottery — typically arm64 for compute-bound workloads.
+
+```yaml
+spec:
+  containers:
+    - name: app
+      image: public.ecr.aws/docker/library/nginx:alpine
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+```
+
+> ⚠️ The image must be a multi-arch manifest (most official images on Docker Hub / ECR Public are). Single-arch images will `ImagePullBackOff` on the wrong node.
+
+### Prefer arm64 but allow amd64 fallback
+
+Use `preferredDuringSchedulingIgnoredDuringExecution` instead of a hard `nodeSelector`. If no arm64 Spot capacity is available, the pod falls back to amd64 instead of staying `Pending`.
+
+```yaml
+spec:
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values: [arm64]
+```
+
+### Force on-demand instead of Spot
+
+By default Karpenter prefers Spot (cheaper, can be reclaimed with 2-min warning). For workloads that can't tolerate interruption, pin `karpenter.sh/capacity-type`:
+
+```yaml
+spec:
+  nodeSelector:
+    karpenter.sh/capacity-type: on-demand
+    kubernetes.io/arch: arm64
+```
+
+### Verify what you got
+
+```bash
+kubectl get pod -o wide                                                  # which node
+kubectl get node <node> -o jsonpath='{.metadata.labels}' | jq            # arch + capacity-type
+# expect: kubernetes.io/arch=arm64, karpenter.sh/capacity-type=spot
+```
+
+The same `nodeSelector` pattern is used by the demo nginx app — see [`non-prod/poc/us-east-1/workload/nginx/terragrunt.hcl`](non-prod/poc/us-east-1/workload/nginx/terragrunt.hcl) for a real Helm-managed example with HPA driving Karpenter scale-up.
+
+---
+
+## Project structure
+
+```
+terraform/
+├── root.hcl                       # global Terragrunt config: s3 backend, AssumeRole, AWS provider
+├── modules/                       # reusable Terraform modules
+│   ├── iam-state/                 # CI/CD role, IAM policies, permissions boundary, EC2-Spot SLR
+│   ├── s3-state/                  # S3 bucket + KMS for tfstate
+│   ├── acm/                       # wildcard ACM cert + Route53 validation (kept; not deployed in POC)
+│   ├── bastion/                   # OpenVPN bastion (default VPC, optional Route53 record)
+│   ├── vpc/                       # thin wrapper over terraform-aws-modules/vpc/aws
+│   ├── eks/                       # thin wrapper over terraform-aws-modules/eks/aws
+│   ├── karpenter/                 # eks/aws//modules/karpenter + Helm + EC2NodeClass/NodePool (vendored chart)
+│   ├── aws-lb-controller/         # IRSA + Helm release of aws-load-balancer-controller
+│   └── helm-release/              # generic helm_release wrapper for app charts (nginx, metrics-server)
+└── non-prod/                      # environment classification
+    └── poc/                       # AWS account
+        ├── account.hcl            # account-level vars (id, role names, tags, bucket)
+        └── us-east-1/             # AWS region
+            ├── region.hcl         # region-level vars (region, cluster_name)
+            ├── bootstrap/         # tier 1 — one-time, never destroyed (local backend)
+            │   ├── iam-state/     # cicd-deployment-role, boundary, ec2-spot SLR
+            │   └── s3-state/      # tfstate bucket
+            ├── persistent/        # tier 2 — survives workload destroy/apply
+            │   └── bastion/       # OpenVPN bastion (acm not deployed in POC)
+            └── workload/          # tier 3 — frequently destroyed/recreated
+                ├── vpc/
+                ├── eks/
+                ├── karpenter/
+                ├── aws-lb-controller/
+                ├── metrics-server/
+                └── nginx/         # demo app: Helm + HPA + Ingress (HTTP) + keepwarm
+```
+
+Hierarchy reads as `env → account → region → tier → unit`. Tier separation is by **lifecycle**, not by feature: bootstrap once, persistent rarely, workload often. Scoped runs:
+
+```bash
+# blow away EKS + nodes + addons, leave bastion/cert/state intact:
+terragrunt run --all destroy --working-dir non-prod/poc/us-east-1/workload
+```
+
+---
+
+## How it works
+
+### Two layers, one repo
+
+- **Bootstrap** (`bootstrap/iam-state`, `bootstrap/s3-state`)
+  - Does NOT include `root.hcl` — uses `backend "local"` (state on disk).
+  - Runs with raw IAM user credentials (`AWS_PROFILE=ae-nyd-plt-init`).
+  - Creates `cicd-deployment-role`, the IAM boundary, the S3 state bucket, KMS key.
+
+- **Main** (everything else)
+  - Includes `root.hcl` → inherits `remote_state` (S3 backend) and `iam_role`.
+  - Terragrunt automatically does `sts:AssumeRole` into `cicd-deployment-role` and injects temporary credentials into Terraform.
+  - The same `AWS_PROFILE=ae-nyd-plt-init` is used at invocation; Terragrunt handles AssumeRole.
+
+### State
+
+- Backend: S3 (`use_lockfile = true` — native S3 locking, no DynamoDB needed).
+- Bucket name: `local.account_vars.locals.s3_terraform_state` (`account.hcl`).
+- Key per unit: `${path_relative_to_include()}/tf.tfstate` — each unit gets its own state file.
+- Bootstrap state is local; `.terraform/`, `terraform.tfstate*`, `.terragrunt-cache/` are gitignored. Do not commit them.
+
+### Permissions boundary
+
+`iam-state` creates a `cicd-boundary` IAM policy. The `cicd-deployment-role` cannot create any IAM role without this boundary attached (enforced by the `iam:PermissionsBoundary` condition in its own policy). Every IAM role created by downstream modules must reference it:
+
+```hcl
+resource "aws_iam_role" "example" {
+  permissions_boundary = var.permissions_boundary_arn  # from iam-state output
+  ...
+}
+```
+
+---
+
+## Prerequisites
+
+- AWS account with an IAM user `terraform` (long-lived access keys).
+- AWS CLI profile `ae-nyd-plt-init` configured with that user's keys (`~/.aws/config` + `~/.aws/credentials`).
+- Terraform >= 1.10 (or OpenTofu >= 1.8).
+- Terragrunt >= 0.69.
+- `kubectl`, `helm` (for cluster operations later).
+- **DNS for the demo Ingress**: external. The nginx Ingress matches Host header = `nginx.${var.domain_name}`. After `apply`, get the ALB DNS from `kubectl get ingress -n demo nginx` and create a CNAME in whatever Route53 zone you own — or test via `curl --resolve` (see Testing methodology). **No Route53 zone is created in this account.**
+
+The `terraform` IAM user needs permissions to bootstrap: create the IAM role, the boundary policy, and the S3 bucket. After bootstrap, the user is only ever used to assume `cicd-deployment-role`.
+
+> Production note: the long-lived access keys are an antipattern. For real environments use OIDC (GitHub Actions / GitLab CI web identity) so there are no static credentials anywhere.
+
+---
+
+## Deploy
+
+### First-time deploy (bootstrap + main)
+
+The first run is a two-step process because `cicd-deployment-role` and the S3 state bucket don't exist yet.
+
+```bash
+# Step 1 — bootstrap (creates IAM role + boundary + S3 bucket; state stored locally)
+AWS_PROFILE=ae-nyd-plt-init terragrunt run --all apply \
+  --working-dir non-prod/poc/us-east-1/bootstrap
+
+# Step 2 — main layer (uses the freshly created bucket and AssumeRole)
+AWS_PROFILE=ae-nyd-plt-init terragrunt run --all apply
+```
+
+### Subsequent deploys
+
+After bootstrap, the regular workflow is one command. Bootstrap is idempotent and won't recreate anything:
+
+```bash
+AWS_PROFILE=ae-nyd-plt-init terragrunt run --all plan
+AWS_PROFILE=ae-nyd-plt-init terragrunt run --all apply
+```
+
+### Single-unit operations
+
+```bash
+cd non-prod/poc/us-east-1/persistent/acm
+AWS_PROFILE=ae-nyd-plt-init terragrunt plan
+AWS_PROFILE=ae-nyd-plt-init terragrunt apply
+```
+
+---
+
+## kubectl access — two AWS profiles
+
+Two AWS CLI profiles are used in this project:
+
+| Profile | What it uses | When |
+|---|---|---|
+| `ae-nyd-plt-init` | IAM user `terraform` access keys (created out-of-band) | bootstrap apply; assume-role source for everything else |
+| `ae-nyd-plt-target` | auto-AssumeRole into `cicd-deployment-role`, source = `ae-nyd-plt-init` | `kubectl`, ad-hoc AWS CLI calls that need cluster RBAC |
+
+`~/.aws/config`:
+
+```ini
+[profile ae-nyd-plt-init]
+region = us-east-1
+
+[profile ae-nyd-plt-target]
+role_arn       = arn:aws:iam::111122223333:role/cicd-deployment-role
+source_profile = ae-nyd-plt-init
+region         = us-east-1
+```
+
+### Why two
+
+The EKS cluster is created with `enable_cluster_creator_admin_permissions = true`, which grants cluster-admin only to the principal that ran `terraform apply`. Terragrunt assumes `cicd-deployment-role` (via `iam_role` in [root.hcl](root.hcl)), so the **role**, not the user, is the cluster admin. For `kubectl` to see the cluster as the same principal, the `aws eks get-token` call must also assume the role — hence the `ae-nyd-plt-target` profile.
+
+### Generate kubeconfig
+
+```bash
+AWS_PROFILE=ae-nyd-plt-target aws eks update-kubeconfig \
+  --region us-east-1 --name poc-plt-eks \
+  --kubeconfig ~/.kube/ae-5353-us-east-1-kubeconfig
+
+export KUBECONFIG=~/.kube/ae-5353-us-east-1-kubeconfig
+kubectl get ns
+```
+
+`update-kubeconfig` writes `AWS_PROFILE: <whatever was in env>` into the kubeconfig's `users.user.exec.env`, so `kubectl` always re-assumes the role on each call. Switching back to `ae-nyd-plt-init` only requires re-running the command with that profile.
+
+In Terragrunt this all happens automatically (root.hcl's `iam_role` does the assume); for kubectl it has to be wired manually through the AWS profile.
+
+---
+
+## Testing methodology
+
+Run after `workload/*` apply succeeds. Tests are layered: each one builds on the previous and exercises one more piece of the stack.
+
+### 0. Health smoke
+
+Verifies every component is alive before exercising it.
+
+```bash
+# (a) nodes — expect 2 bootstrap nodes Ready in 2 AZs, t4g.medium / arm64
+kubectl get nodes -L topology.kubernetes.io/zone -L node.kubernetes.io/instance-type -L kubernetes.io/arch
+
+# (b) system pods — all Running: coredns, kube-proxy, aws-node (vpc-cni),
+#     eks-pod-identity-agent, karpenter (×2), metrics-server (×1)
+kubectl get pods -A
+
+# (c) cluster RBAC — cicd-deployment-role should hold ClusterAdmin via Access Entry
+AWS_PROFILE=ae-nyd-plt-target aws eks list-access-entries --cluster-name poc-plt-eks
+
+# (d) Karpenter CRDs — default EC2NodeClass and NodePool both Ready=True
+kubectl get ec2nodeclass,nodepool
+
+# (e) metrics API — `kubectl top` must work; HPA depends on it
+kubectl top nodes
+kubectl top pods -A | head -10
+
+# (f) Ingress + ALB — should have CLASS=alb, ADDRESS=k8s-...elb.amazonaws.com
+kubectl get ingress -n demo
+```
+
+### 0.5. End-to-end through the ALB
+
+The nginx Ingress is reachable as `http://<hostname>/` where `<hostname>` is `nginx.${var.domain_name}` (default `nginx.poc-eks-karpenter.domain.xyz`). POC has no real DNS in this account, so test with `curl --resolve` to bypass DNS:
+
+```bash
+ALB=$(kubectl get ingress -n demo nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+HOST=$(kubectl get ingress -n demo nginx -o jsonpath='{.spec.rules[0].host}')
+ALB_IP=$(dig +short "$ALB" | head -1)
+
+curl -sI --resolve "$HOST:80:$ALB_IP" "http://$HOST/"
+# Expect: HTTP/1.1 200 OK + Server: nginx
+```
+
+Why this works: `--resolve` overrides DNS for `$HOST`. ALB receives the request with `Host: $HOST` header, the listener rule matches `host-header == $HOST`, traffic forwards to the nginx target group. Same path a real CNAME would take, just resolved client-side.
+
+For a permanent setup (so `curl http://$HOST/` works without `--resolve`): add a CNAME `$HOST → $ALB` in your authoritative zone. In this POC that lives in another AWS account (`example.com`); the cross-account automation is a TODO.
+
+If anything fails, check the relevant component's logs:
+```bash
+kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --tail=80 | grep -iE "error|warn"
+kubectl logs -n kube-system -l app.kubernetes.io/name=metrics-server --tail=40
+```
+
+### Test 1 — Karpenter provisions a spot node
+
+Schedule a pod the bootstrap NG can't host (no `karpenter.sh/capacity-type` label on bootstrap nodes), watch Karpenter create a NodeClaim and an EC2 instance, the pod lands.
+
+```bash
+# trigger
+kubectl run pause-arm --image=public.ecr.aws/eks-distro/kubernetes/pause:3.7 \
+  --overrides='{"spec":{"nodeSelector":{"karpenter.sh/capacity-type":"spot","kubernetes.io/arch":"arm64"}}}'
+
+# observe (~30-60s)
+kubectl get nodeclaim
+kubectl get nodes -L karpenter.sh/capacity-type -L kubernetes.io/arch \
+  -L node.kubernetes.io/instance-type -L topology.kubernetes.io/zone
+
+# Karpenter logs (decision-making)
+kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter --tail=40 \
+  | grep -iE "provision|launched|nodeclaim"
+```
+
+**Expected**: a new node with `CAPACITY-TYPE=spot`, `ARCH=arm64`, instance type chosen by Karpenter (cheapest fit — typically `c7g`/`c8g`/`m7g` family, `large`).
+
+**Pass criteria**: pod `Running` within 90s, NodeClaim `READY=True`.
+
+Repeat with `arm64 → amd64` to verify multi-arch:
+```bash
+kubectl run pause-amd --image=public.ecr.aws/eks-distro/kubernetes/pause:3.7 \
+  --overrides='{"spec":{"nodeSelector":{"karpenter.sh/capacity-type":"spot","kubernetes.io/arch":"amd64"}}}'
+```
+
+Cleanup:
+```bash
+kubectl delete pod pause-arm pause-amd
+# Karpenter consolidates ~30s after pods leave (consolidationPolicy: WhenEmptyOrUnderutilized)
+```
+
+### Test 2 — HPA + Karpenter cascade under load
+
+Full POC story: realistic CPU-bound workload (`workload/nginx` with `autoscaling.targetCPU=50`) → HPA scales pods → Karpenter scales nodes.
+
+#### Setup
+
+`workload/nginx` is configured with:
+- `requests.cpu = 500m`, `limits.cpu = 1000m` — sized so 10 replicas (5 vCPU) exceed the capacity of 2 spot nodes (~4 vCPU). Forces Karpenter to provision additional capacity.
+- `autoscaling.minReplicas=2, maxReplicas=10, targetCPU=50` — scale up when avg CPU > 250m per pod.
+- `nodeSelector: karpenter.sh/capacity-type=spot` — bootstrap NG cannot host these pods.
+- `topologySpreadConstraints` on `topology.kubernetes.io/zone` (soft) — replicas spread across AZs when possible.
+
+#### Watcher
+
+In one terminal:
+```bash
+watch -n 2 '
+echo "=== HPA ==="; kubectl get hpa -n demo;
+echo;
+echo "=== Nginx pods ==="; kubectl get pods -n demo -l app.kubernetes.io/name=nginx -o wide --no-headers;
+echo;
+echo "=== Spot nodes ==="; kubectl get nodes -L karpenter.sh/capacity-type --no-headers | grep spot;
+echo;
+echo "=== NodeClaims ==="; kubectl get nodeclaim --no-headers
+'
+```
+
+#### Generate load
+
+`fortio` produces sustained, controllable concurrency — far better than busybox `wget` loops which are sequential per pod.
+
+```bash
+kubectl run fortio -n demo --image=fortio/fortio --restart=Never -- \
+  load -c 200 -qps 0 -t 10m http://nginx.demo.svc.cluster.local/
+```
+
+- `-c 200` — 200 concurrent connections.
+- `-qps 0` — no rate limit (push as hard as the server allows).
+- `-t 10m` — duration.
+
+For even more intensity, run multiple busybox loops in parallel alongside fortio (as a quick "spam" generator):
+```bash
+for i in 1 2 3 4 5; do
+  kubectl run -n demo "loadgen-$i" --image=busybox:1.28 --restart=Never -- \
+    /bin/sh -c "while sleep 0.005; do wget -q -O- http://nginx.demo.svc.cluster.local; done" &
+done
+```
+
+#### Expected timeline
+
+| Time | What happens |
+|---|---|
+| 0:00 | Load generators start; fortio drives ~200 RPS× per nginx pod. |
+| 0:30 | metrics-server reports CPU climbing on nginx pods. |
+| 0:45 | HPA: `cpu: 90%/50%, REPLICAS: 4`. |
+| 1:00 | HPA: `cpu: 110%/50%, REPLICAS: 8`. |
+| 1:15 | HPA hits `REPLICAS: 10`. New pods (8th, 9th, 10th) Pending — no capacity. |
+| 1:30 | Karpenter NodeClaim(s) created; `kubectl get nodeclaim` shows `READY=Unknown`. |
+| 2:00 | New spot node(s) Ready and joined (typical types: `c7gn.large`, `c8gn.large`, `c6gd.large`, `m8gd.large`, `c7i-flex.large` — Karpenter picks cheapest spot in the moment). |
+| 2:15 | Pending nginx pods scheduled on new node(s). Avg CPU per pod settles below 50%. |
+
+**Pass criteria**:
+- HPA `REPLICAS` reached `maxReplicas: 10`.
+- Total spot nodes increased from 2 → 3+ during peak.
+- All 10 nginx pods `Running` simultaneously.
+- HPA `TARGETS` shows real CPU percentages (never `<unknown>`).
+
+#### Cleanup
+
+Stop load:
+```bash
+kubectl delete pod -n demo loadgen-{1..5} fortio --ignore-not-found
+```
+
+Watch the unwind (this exercises consolidation, the second Karpenter superpower):
+
+| Time | What happens |
+|---|---|
+| 0:00 | Load stops. CPU on nginx drops to ~0%. |
+| ~5:00 | HPA `REPLICAS` drops back to 2 (default `--horizontal-pod-autoscaler-downscale-stabilization=5m`). |
+| ~5:30 | Empty/underutilized spot nodes consolidate (`consolidateAfter: 30s`). NodeClaims terminate, instances shut down. |
+| ~6:00 | Cluster steady-state: 2 bootstrap + 1-2 spot. |
+
+#### Tear down the demo entirely
+
+```bash
+cd non-prod/poc/us-east-1/workload/nginx
+AWS_PROFILE=ae-nyd-plt-init terragrunt destroy
+# Helm release uninstalled, demo namespace removed, all spot nodes consolidated.
+```
+
+### Where Karpenter-managed nodes appear in the AWS Console
+
+This trips people up: **Karpenter does NOT use EKS Managed Node Groups**. EKS Console → Compute → Node Groups shows only `bootstrap` (one row), regardless of how many spot nodes Karpenter has running.
+
+| Component | Console location |
+|---|---|
+| Bootstrap NG | EKS → Compute → Node Groups → `bootstrap`, also EC2 → Auto Scaling Groups |
+| Karpenter spot nodes | EC2 → Instances (filter by tag `karpenter.sh/nodepool=default`) |
+| Karpenter spot launches | EC2 → Spot Requests (active fleet requests) |
+| Karpenter launch templates | EC2 → Launch Templates (one per EC2NodeClass) |
+
+In Kubernetes both kinds appear together via `kubectl get nodes`. Distinguish by labels:
+```bash
+kubectl get nodes -l eks.amazonaws.com/nodegroup=bootstrap   # bootstrap NG nodes
+kubectl get nodes -l karpenter.sh/nodepool=default           # Karpenter nodes
+```
+
+---
+
+## Networking choices
+
+### VPC for the bastion: default VPC
+
+The `bastion` module deploys into the **account default VPC** for POC simplicity. This is intentionally the lazy choice. For production, replace it with a dedicated platform VPC (small, public-only, no NAT) and reference it via `var.vpc_id`/`var.subnet_ids`.
+
+### VPC for EKS workload: dedicated VPC
+
+EKS will get its own VPC (`workload/vpc`) — public + private subnets, NAT, EKS-specific subnet tags. This is independent of the bastion VPC.
+
+### Reaching workers from VPN
+
+Because bastion VPC ≠ workload VPC, **VPN clients cannot reach EKS workers without VPC peering** between the two. For POC this is acceptable (debugging via `kubectl` against the EKS public+private endpoint works directly from a laptop). When/if EKS endpoint is locked to private only, add a VPC peering or Transit Gateway.
+
+### EKS API endpoint
+
+Plan: start with `endpoint_public_access = true` AND `endpoint_private_access = true`.
+- Public lets you `kubectl` from a laptop without VPN.
+- Private keeps in-VPC traffic (Karpenter, kubelet → API) off the internet.
+
+Later, after the bastion + VPN are validated, you can flip `endpoint_public_access = false`. **Do not flip it without first testing kubectl through the VPN** — otherwise you lock yourself out of the cluster.
+
+---
+
+## Bastion / OpenVPN
+
+`persistent/bastion` provisions a t4g.small EC2 in the account default VPC with:
+- Elastic IP (output as `public_ip`).
+- IAM instance-profile with `AmazonSSMManagedInstanceCore`.
+- Security group: ingress on TCP/22 (SSH) and UDP/1194 (OpenVPN) restricted to `var.allowed_cidrs`.
+- cloud-init that installs OpenVPN community + easy-rsa, generates a self-signed CA + server cert + one client cert (`client1`), brings up the OpenVPN server, and writes a helper `/usr/local/bin/get-ovpn-config` that prints a self-contained `.ovpn` to stdout.
+
+### DNS
+
+`create_dns_record = false` by default — the project doesn't manage Route53 in this account. Take `public_ip` from the module output and add a CNAME / A record manually in your authoritative zone (e.g. `bastion.poc.example.com`).
+
+### Connecting
+
+```bash
+# Get the .ovpn (assumes SSM agent is online — see TODO if it isn't)
+INSTANCE_ID=$(cd non-prod/poc/us-east-1/persistent/bastion && terragrunt output -raw instance_id)
+AWS_PROFILE=ae-nyd-plt-target aws ssm start-session --target "$INSTANCE_ID"
+
+# Inside the session:
+sudo /usr/local/bin/get-ovpn-config > /tmp/client1.ovpn
+exit
+
+# Copy /tmp/client1.ovpn to your laptop and import into Tunnelblick / openvpn3.
+```
+
+For additional clients, ssh/SSM in and run `cd /etc/openvpn/easy-rsa && EASYRSA_BATCH=1 ./easyrsa gen-req clientN nopass && ./easyrsa sign-req client clientN`. PKI lives in `/etc/openvpn/easy-rsa/pki`.
+
+> Lock down `allowed_cidrs` in `persistent/bastion/terragrunt.hcl` to your real public IP before applying. `0.0.0.0/0` opens SSH/UDP-1194 to the world.
+
+---
+
+## Karpenter
+
+Capacity strategy:
+- Spot-first, On-Demand fallback.
+- Instance type diversification to reduce interruption risk.
+- Multi-architecture: `amd64` (Intel/AMD) + `arm64` (Graviton).
+
+Pinning workloads:
+
+```yaml
+# x86_64
+spec:
+  nodeSelector:
+    kubernetes.io/arch: amd64
+
+# arm64 (Graviton)
+spec:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+```
+
+For production prefer `nodeAffinity` over `nodeSelector` — gives soft/hard preferences and richer expressions.
+
+---
+
+## Module strategy: thin wrappers around `terraform-aws-modules`
+
+`vpc`, `eks`, `karpenter`, `aws-lb-controller` are **thin local wrappers** around the community modules at https://github.com/terraform-aws-modules — battle-tested, prod-quality. The local module fixes project conventions (tags, naming, boundary attachment, region pinning, vendoring of charts); the upstream module does the heavy lifting (security groups, addons, IAM, edge cases).
+
+Custom-from-scratch is reserved for things that are simple enough to own (`iam-state`, `s3-state`, `bastion`, `acm`, `helm-release`).
+
+---
+
+## Out of scope
+
+- Observability stack (Prometheus, Grafana, Loki).
+- Centralized logging, alerting (PagerDuty / OpsGenie).
+- Service mesh.
+- GitOps (ArgoCD / Flux).
+- Multi-environment beyond `non-prod/poc/`.
+
+---
+
+## Known caveats
+
+### Bitnami images moved to `bitnamilegacy`
+
+Since mid-2025 Bitnami restricted free-tier access to `docker.io/bitnami/*` images and snapshotted them into `docker.io/bitnamilegacy/*`. Charts now also embed a verification step that **rejects** non-secure/non-premium image registries unless `global.security.allowInsecureImages = true` is set. Two overrides are required for any bitnami chart:
+
+```hcl
+values = {
+  global = { security = { allowInsecureImages = true } }
+  image  = { registry = "docker.io", repository = "bitnamilegacy/<chart>" }
+}
+```
+
+For long-term, switch to alternative charts (NGINX Inc, custom) or self-hosted images.
+
+### EKS Spot service-linked role
+
+`AWSServiceRoleForEC2Spot` must exist in the account before any spot launch (Karpenter or otherwise). It's a one-time AWS bootstrap. Created via `aws_iam_service_linked_role.ec2_spot` in `iam-state`. If you import the project to a new account, this is created automatically by the bootstrap apply.
+
+---
+
+## TODO
+
+- **Karpenter chart vendored locally**. The chart `oci://public.ecr.aws/karpenter/karpenter` is pre-pulled into `modules/karpenter/charts/karpenter-<version>.tgz` and committed. Done because `helm provider v3` re-authenticates against OCI on every `plan`, and the auth token (TTL 12h from `data.aws_ecrpublic_authorization_token`) frequently fails with `403 expired` on subsequent applies. To bump the chart version: `helm pull oci://public.ecr.aws/karpenter/karpenter --version <X.Y.Z> --destination modules/karpenter/charts/`, update `var.karpenter_chart_version`, commit. Runtime image pulls (`public.ecr.aws/karpenter/controller`) are anonymous and unaffected. Tracked at https://github.com/hashicorp/terraform-provider-helm
+- **Cross-account DNS automation**. The authoritative zone (`example.com`) is in a different AWS account from where the workload runs. Currently the operator manually adds CNAMEs. Two options to automate: (a) cross-account IAM trust — give this account a role in the DNS account that lets it `route53:ChangeResourceRecordSets` on `*.poc.example.com`; deploy `external-dns` here pointing at that role. (b) `external-dns` running in DNS account, watching the workload account's resources via cross-account read of LB addresses. (a) is more idiomatic. Once done, drop `--resolve` from the test methodology and use `curl http://$HOST/` directly.
+- **HTTPS / ACM cert + real domain**. The demo Ingress on nginx is **HTTP-only**. ACM DNS-validation requires the cert's domain to be delegated to a Route53 zone in this AWS account; in the original POC neither candidate domain qualified (corp parent zone wasn't delegate-able; the personal alternative lived in a different AWS account). To enable HTTPS for prod: either (a) cross-account delegate a subdomain to this account's Route53 (NS records pointing at this account's nameservers), then re-enable `persistent/acm` and add the HTTPS listener back to `nginx/terragrunt.hcl`, or (b) provision the cert externally and import via `aws_acm_certificate.import_*`. `modules/acm/` is already written and reusable.
+- Bumping bootstrap node group `min_size`/`desired_size` after first apply requires a manual `aws eks update-nodegroup-config` because the upstream module (`terraform-aws-modules/eks/aws`) `ignore_changes = [scaling_config[0].desired_size]` on the managed NG. Workflow: AWS CLI to raise desired, then `terragrunt apply` for min/max. Document or wrap this in a small helper if it becomes routine.
+- **Bastion SSM agent registration**. After `persistent/bastion` apply the SSM agent stays `Offline` (PingStatus empty). Reboot did not help. cloud-init initially failed on a `dnf -y update` curl/curl-minimal conflict — fixed in the script, but the agent never registered even on the rebuilt instance. Investigate: AL2023-arm64 AMI agent state, IMDSv2 + SG egress to `ssm.<region>.amazonaws.com` / `ec2messages.<region>` / `ssmmessages.<region>` (we allow all egress so should be fine), `sudo systemctl status amazon-ssm-agent` once we have any other path in. Workaround until fixed: SSH key access (would need to add `key_name` to the EC2 resource) or AWS Systems Manager → Fleet Manager remote shell from console.
+- `workload/external-dns` (optional — auto-creates Route53 records for Service/Ingress). Limited utility while DNS is in another account; would need cross-account write permissions.
+- `aws-ebs-csi-driver` EKS addon (currently disabled — requires IRSA role / Pod Identity Association for the controller pod). Add when PersistentVolumes are needed.
+- VPC peering between bastion VPC (default) and workload VPC, so VPN clients can reach EKS workers.
+- Switch EKS endpoint to private-only after VPN is validated.
+- **Migrate bootstrap state from local backend to S3** after deploy stabilizes. Currently `bootstrap/iam-state` and `bootstrap/s3-state` use `backend "local"` — state lives inside `.terragrunt-cache/...` and is destroyed by any `rm -rf .terragrunt-cache`. Migration steps: drop the `generate "backend"` block, add `include "root"` (inherits S3 backend), run `terragrunt init -migrate-state`. Until done: **never** delete `.terragrunt-cache` inside `bootstrap/`.
+
+---
+
+## Roadmap to production
+
+- Replace static IAM user keys with OIDC for CI/CD.
+- Tighten boundary policy (currently `Allow *` minus boundary tampering — fine for POC, too wide for prod).
+- Migrate bootstrap state from local to S3 after the bucket exists.
+- Narrow `infra` IAM policy from action wildcards (`eks:*`, `ec2:*`) to specific actions.
+- Multi-env via separate AWS accounts (Organizations) and matching `account.hcl` per env.
+- OPA / Kyverno admission policies, NetworkPolicies, Secrets Manager / Vault for app secrets.
+- Replace default VPC for bastion with a dedicated platform VPC.
