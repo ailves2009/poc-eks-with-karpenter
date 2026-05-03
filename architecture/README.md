@@ -42,10 +42,10 @@ Different audiences read this architecture for different reasons. The design tri
 |---|---|---|
 | **Engineering** (5 devs, day-to-day) | Deploy velocity, low ops overhead, multi-arch builds, fast feedback loops, no on-call surprises | Managed EKS + Karpenter, GitOps with Argo CD, distroless images, multi-arch buildx, IRSA replacing static creds |
 | **Security & Compliance** (likely future hire / fractional CISO) | SOC 2 readiness, PII protection, audit trail integrity, secret hygiene, supply-chain provenance | Org-wide CloudTrail to immutable `log-archive`, GuardDuty/Security Hub/Macie, KMS CMKs per data class, Secrets Manager + IAM DB auth, cosign + Sigstore policy-controller |
-| **Finance / Founders** | Predictable spend, no surprise bills, clear cost-per-environment attribution, scaling cost stays sub-linear | Per-account billing (no tag discipline required), Spot+Graviton baseline, Aurora Serverless v2 in non-prod, Savings Plans path, monthly cost estimate in §7 |
-| **Product / Business** | Uptime SLO, fast time-to-feature, ability to grow internationally, no architectural rewrites blocking growth | 99.9% SLO with clear path to 99.95%+, CI/CD with canary rollouts, additive 6-phase roadmap (§8), CloudFront global edge, Aurora Global DB option for international |
+| **Finance / Founders** | Predictable spend, no surprise bills, clear cost-per-environment attribution, scaling cost stays sub-linear | Per-account billing (no tag discipline required), Spot+Graviton baseline, Aurora Serverless v2 in non-prod, Savings Plans path, monthly cost estimate in [§7 Cost optimization](#7-cost-optimization) |
+| **Product / Business** | Uptime SLO, fast time-to-feature, ability to grow internationally, no architectural rewrites blocking growth | 99.9% SLO with clear path to 99.95%+, CI/CD with canary rollouts, additive 6-phase roadmap in [§8 Roadmap](#8-roadmap--from-few-hundred-users-to-millions), CloudFront global edge, Aurora Global DB option for international |
 
-The trade-offs noted in §9 are the places where one stakeholder's concern was deliberately weighed against another's — usually engineering velocity vs security posture, or feature speed vs cost discipline.
+The trade-offs noted in [§9 Key trade-offs and what I'd revisit](#9-key-trade-offs-and-what-id-revisit) are the places where one stakeholder's concern was deliberately weighed against another's — usually engineering velocity vs security posture, or feature speed vs cost discipline.
 
 ---
 
@@ -156,7 +156,30 @@ flowchart LR
 
 ## 1. Cloud environment structure
 
-### Recommendation
+### Cloud provider: AWS over GCP
+
+Both AWS and GCP can host this workload well. The choice is **AWS** for these specific reasons:
+
+1. **Multi-account & compliance tooling is more mature.** AWS Organizations + Identity Center + Service Control Policies + Control Tower give a battle-tested path to SOC 2 / HIPAA. GCP's Resource Manager + folders + Org Policies cover the same ground but with fewer guardrails out of the box and a smaller third-party ecosystem.
+2. **Security telemetry is first-party and broader.** GuardDuty, Security Hub, Macie, Inspector, IAM Access Analyzer, Config Conformance Packs — all native, integrated, and aggregable across the org. GCP's Security Command Center is comparable but the premium tier is pricier and has fewer 3rd-party integrations.
+3. **The team already has an AWS POC.** [terraform/](../terraform/) is built on EKS + Karpenter + IRSA + ECR. Choosing GCP means rewriting Terraform, retraining 5 engineers, and rebuilding the CI pipeline — for a delta in capability that doesn't justify the cost.
+4. **IAM and KMS give finer control for sensitive data.** AWS IAM (with conditions, SCPs, permission boundaries) and KMS (with key policies, grants, per-resource CMKs) offer more knobs for compliance-heavy workloads. GCP IAM is cleaner but less expressive — fine for most apps, less so when an auditor asks about per-resource cryptographic isolation.
+
+### Where GCP is genuinely stronger (and we accept the trade-off)
+
+- **GKE Autopilot** is meaningfully less ops-heavy than EKS — closer to "submit a pod and forget". Workload Identity is more elegant than IRSA. For a 5-engineer team, this is a real cost. We compensate by leaning hard on managed add-ons (Karpenter, AWS LB Controller, Argo CD) so EKS day-2 effort stays minimal.
+- **Networking defaults** — GCP's global VPC and simpler subnet model are easier to reason about than AWS's per-region VPC, NAT-per-AZ, and VPC endpoint zoo. We accept the verbosity in exchange for more granular control.
+- **BigQuery** — best-in-class data warehouse with no AWS equivalent at the same operational simplicity. Not a factor today (Innovate has no analytics workload), but a real factor if product analytics becomes a core feature.
+
+### Triggers to reconsider this choice
+
+- A major customer or partner is GCP-anchored and data colocation matters.
+- Product roadmap pivots toward heavy analytics or ML — BigQuery + Vertex AI become decisive.
+- The team grows and a majority strongly prefers GCP-native ergonomics (Autopilot, simpler IAM).
+
+None of these are likely in the 12-month horizon, so the choice is committed, not provisional.
+
+### AWS account topology
 
 **AWS Organization with Identity Center** as the access plane, organized into Organizational Units (OUs) and discrete accounts:
 
@@ -314,7 +337,7 @@ This is the **same pattern proven in the [Terraform POC](../terraform/)** — th
 
 ## 4. Database — PostgreSQL
 
-### Recommendation
+### Decision
 
 Start with **Amazon RDS for PostgreSQL Multi-AZ**; migrate to **Aurora PostgreSQL** when read-traffic or HA requirements demand it.
 
