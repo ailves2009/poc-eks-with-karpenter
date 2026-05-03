@@ -206,10 +206,6 @@ Innovate Inc. (Org root)
 - **Quota separation**: hitting an EC2 quota in non-prod doesn't starve prod.
 - **Day-2 growth**: adding `staging-eu`, `prod-eu`, or per-customer accounts becomes mechanical (Account Factory / Control Tower).
 
-### Why not fewer accounts (e.g. just `prod` + `dev`)
-
-A 2-account model collapses audit logs and security tooling into the same account that runs workloads, which means an attacker who compromises a node can tamper with the evidence trail. SOC 2 auditors reject this. The marginal cost of extra accounts is zero (AWS doesn't charge per-account); the operational cost is solved by Identity Center + Terraform.
-
 ### Access model
 
 - **Humans**: Identity Center federated to the corporate IdP (Google Workspace / Okta). Each engineer assumes a role into the right account via SSO; permission sets scope what they can do (e.g. `EKSDeveloper` in non-prod is admin, in prod is read-only).
