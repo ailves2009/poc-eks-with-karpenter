@@ -3,6 +3,21 @@
 Reverse-chronological log of structural / behavioural changes. Bug fixes that
 don't change behaviour aren't listed unless they shaped the design.
 
+## 0.1.1 — Submission prep
+
+### Removed
+
+- **`modules/acm`** — kept until now as "not deployed in POC", but unused
+  in any unit. Removed to reduce surface area. ACM / HTTPS path remains
+  documented in README → TODO for whenever a real domain is delegated to
+  this account.
+
+### Changed
+
+- Repo restructured: `terraform/` is now a subdirectory of the submission
+  root (`poc-task-for-opsfleet/{terraform,architecture}/`). Internal layout
+  of `terraform/` unchanged — all unit and module paths are the same.
+
 ## 0.1.0 — POC complete
 
 ### Added
