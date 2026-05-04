@@ -4,18 +4,30 @@ Terragrunt-based infrastructure for a production-oriented EKS cluster with Karpe
 
 ---
 
-## ⚠️ Before you do ANYTHING — replace these placeholders
+## ⚠️ Before you do ANYTHING
 
-The repo ships with placeholder values that are intentionally invalid. `apply` will fail until each is replaced.
+The repo ships with placeholder values that are intentionally invalid. `apply` will fail until each is replaced. Read this whole section before running any command.
 
-| File | Placeholder | Replace with |
-|---|---|---|
-| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `aws_account_id = "111122223333"` | your AWS account ID |
-| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `s3_terraform_state = "nyd-plt-tf-state"` | a globally-unique S3 bucket name |
-| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl) | `domain_name = "poc-eks-karpenter.domain.xyz"` | a domain you control (used as Ingress Host header; not actually resolved in the POC) |
-| [`non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl`](non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl) | `allowed_cidrs = ["YOUR.PUBLIC.IP.HERE/32"]` | your office/home IP — `curl ifconfig.me` |
+### Placeholders to replace
 
-You also need an AWS CLI profile `ae-nyd-plt-init` configured with an IAM user that can bootstrap (create IAM roles, S3 bucket, KMS key). See [Prerequisites](#prerequisites) for details.
+| File                                                                                                                   | Placeholder                                    | Replace with                                                                         |
+| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------ |
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl)                                                                 | `aws_account_id = "111122223333"`              | your AWS account ID                                                                  |
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl)                                                                 | `s3_terraform_state = "nyd-plt-tf-state"`      | a globally-unique S3 bucket name                                                     |
+| [`non-prod/poc/account.hcl`](non-prod/poc/account.hcl)                                                                 | `domain_name = "poc-eks-karpenter.domain.xyz"` | a domain you control (used as Ingress Host header; not actually resolved in the POC) |
+| [`non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl`](non-prod/poc/us-east-1/persistent/bastion/terragrunt.hcl) | `allowed_cidrs = ["YOUR.PUBLIC.IP.HERE/32"]`   | your office/home IP — `curl ifconfig.me`                                             |
+
+### Operational requirements
+
+- **All commands below assume `cd terraform/` from the repo root.** Paths are relative to that.
+- **Your IAM user MUST be named exactly `terraform`.** The `cicd-deployment-role` trust policy hardcodes this principal in [`bootstrap/iam-state/terragrunt.hcl`](non-prod/poc/us-east-1/bootstrap/iam-state/terragrunt.hcl). If you use a different name, `sts:AssumeRole` will fail after bootstrap and the main apply will not proceed.
+- **For first-time bootstrap, attach `AdministratorAccess` to the IAM user.** After bootstrap completes you can detach it — `cicd-deployment-role` (with its scoped policies + permissions boundary) does all the work going forward.
+- **Two AWS CLI profiles are assumed throughout this README:**
+  - `ae-nyd-plt-init` — IAM user `terraform` access keys. Used by Terragrunt for bootstrap and as the AssumeRole source for everything else.
+  - `ae-nyd-plt-target` — auto-AssumeRole into `cicd-deployment-role`. Used only by `kubectl` and ad-hoc AWS CLI calls that need cluster RBAC. **Configured later** — see [§kubectl access](#kubectl-access--two-aws-profiles); only needed once the cluster exists.
+
+  Either create profiles with exactly these names, or grep+replace `ae-nyd-plt-init` / `ae-nyd-plt-target` globally before running anything.
+- **Full apply takes ~35 minutes** (EKS cluster creation alone is ~15 min). Don't assume it's hung — `terragrunt run --all apply` is processing dependencies in order.
 
 ---
 
@@ -114,7 +126,6 @@ terraform/
 ├── modules/                       # reusable Terraform modules
 │   ├── iam-state/                 # CI/CD role, IAM policies, permissions boundary, EC2-Spot SLR
 │   ├── s3-state/                  # S3 bucket + KMS for tfstate
-│   ├── acm/                       # wildcard ACM cert + Route53 validation (kept; not deployed in POC)
 │   ├── bastion/                   # OpenVPN bastion (default VPC, optional Route53 record)
 │   ├── vpc/                       # thin wrapper over terraform-aws-modules/vpc/aws
 │   ├── eks/                       # thin wrapper over terraform-aws-modules/eks/aws
@@ -130,7 +141,7 @@ terraform/
             │   ├── iam-state/     # cicd-deployment-role, boundary, ec2-spot SLR
             │   └── s3-state/      # tfstate bucket
             ├── persistent/        # tier 2 — survives workload destroy/apply
-            │   └── bastion/       # OpenVPN bastion (acm not deployed in POC)
+            │   └── bastion/       # OpenVPN bastion
             └── workload/          # tier 3 — frequently destroyed/recreated
                 ├── vpc/
                 ├── eks/
@@ -225,7 +236,7 @@ AWS_PROFILE=ae-nyd-plt-init terragrunt run --all apply
 ### Single-unit operations
 
 ```bash
-cd non-prod/poc/us-east-1/persistent/acm
+cd non-prod/poc/us-east-1/workload/eks
 AWS_PROFILE=ae-nyd-plt-init terragrunt plan
 AWS_PROFILE=ae-nyd-plt-init terragrunt apply
 ```
@@ -236,10 +247,10 @@ AWS_PROFILE=ae-nyd-plt-init terragrunt apply
 
 Two AWS CLI profiles are used in this project:
 
-| Profile | What it uses | When |
-|---|---|---|
-| `ae-nyd-plt-init` | IAM user `terraform` access keys (created out-of-band) | bootstrap apply; assume-role source for everything else |
-| `ae-nyd-plt-target` | auto-AssumeRole into `cicd-deployment-role`, source = `ae-nyd-plt-init` | `kubectl`, ad-hoc AWS CLI calls that need cluster RBAC |
+| Profile             | What it uses                                                            | When                                                    |
+| ------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------- |
+| `ae-nyd-plt-init`   | IAM user `terraform` access keys (created out-of-band)                  | bootstrap apply; assume-role source for everything else |
+| `ae-nyd-plt-target` | auto-AssumeRole into `cicd-deployment-role`, source = `ae-nyd-plt-init` | `kubectl`, ad-hoc AWS CLI calls that need cluster RBAC  |
 
 `~/.aws/config`:
 
@@ -412,16 +423,16 @@ done
 
 #### Expected timeline
 
-| Time | What happens |
-|---|---|
-| 0:00 | Load generators start; fortio drives ~200 RPS× per nginx pod. |
-| 0:30 | metrics-server reports CPU climbing on nginx pods. |
-| 0:45 | HPA: `cpu: 90%/50%, REPLICAS: 4`. |
-| 1:00 | HPA: `cpu: 110%/50%, REPLICAS: 8`. |
-| 1:15 | HPA hits `REPLICAS: 10`. New pods (8th, 9th, 10th) Pending — no capacity. |
-| 1:30 | Karpenter NodeClaim(s) created; `kubectl get nodeclaim` shows `READY=Unknown`. |
+| Time | What happens                                                                                                                                                               |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0:00 | Load generators start; fortio drives ~200 RPS× per nginx pod.                                                                                                              |
+| 0:30 | metrics-server reports CPU climbing on nginx pods.                                                                                                                         |
+| 0:45 | HPA: `cpu: 90%/50%, REPLICAS: 4`.                                                                                                                                          |
+| 1:00 | HPA: `cpu: 110%/50%, REPLICAS: 8`.                                                                                                                                         |
+| 1:15 | HPA hits `REPLICAS: 10`. New pods (8th, 9th, 10th) Pending — no capacity.                                                                                                  |
+| 1:30 | Karpenter NodeClaim(s) created; `kubectl get nodeclaim` shows `READY=Unknown`.                                                                                             |
 | 2:00 | New spot node(s) Ready and joined (typical types: `c7gn.large`, `c8gn.large`, `c6gd.large`, `m8gd.large`, `c7i-flex.large` — Karpenter picks cheapest spot in the moment). |
-| 2:15 | Pending nginx pods scheduled on new node(s). Avg CPU per pod settles below 50%. |
+| 2:15 | Pending nginx pods scheduled on new node(s). Avg CPU per pod settles below 50%.                                                                                            |
 
 **Pass criteria**:
 - HPA `REPLICAS` reached `maxReplicas: 10`.
@@ -438,12 +449,12 @@ kubectl delete pod -n demo loadgen-{1..5} fortio --ignore-not-found
 
 Watch the unwind (this exercises consolidation, the second Karpenter superpower):
 
-| Time | What happens |
-|---|---|
-| 0:00 | Load stops. CPU on nginx drops to ~0%. |
-| ~5:00 | HPA `REPLICAS` drops back to 2 (default `--horizontal-pod-autoscaler-downscale-stabilization=5m`). |
+| Time  | What happens                                                                                                     |
+| ----- | ---------------------------------------------------------------------------------------------------------------- |
+| 0:00  | Load stops. CPU on nginx drops to ~0%.                                                                           |
+| ~5:00 | HPA `REPLICAS` drops back to 2 (default `--horizontal-pod-autoscaler-downscale-stabilization=5m`).               |
 | ~5:30 | Empty/underutilized spot nodes consolidate (`consolidateAfter: 30s`). NodeClaims terminate, instances shut down. |
-| ~6:00 | Cluster steady-state: 2 bootstrap + 1-2 spot. |
+| ~6:00 | Cluster steady-state: 2 bootstrap + 1-2 spot.                                                                    |
 
 #### Tear down the demo entirely
 
@@ -457,12 +468,12 @@ AWS_PROFILE=ae-nyd-plt-init terragrunt destroy
 
 This trips people up: **Karpenter does NOT use EKS Managed Node Groups**. EKS Console → Compute → Node Groups shows only `bootstrap` (one row), regardless of how many spot nodes Karpenter has running.
 
-| Component | Console location |
-|---|---|
-| Bootstrap NG | EKS → Compute → Node Groups → `bootstrap`, also EC2 → Auto Scaling Groups |
-| Karpenter spot nodes | EC2 → Instances (filter by tag `karpenter.sh/nodepool=default`) |
-| Karpenter spot launches | EC2 → Spot Requests (active fleet requests) |
-| Karpenter launch templates | EC2 → Launch Templates (one per EC2NodeClass) |
+| Component                  | Console location                                                          |
+| -------------------------- | ------------------------------------------------------------------------- |
+| Bootstrap NG               | EKS → Compute → Node Groups → `bootstrap`, also EC2 → Auto Scaling Groups |
+| Karpenter spot nodes       | EC2 → Instances (filter by tag `karpenter.sh/nodepool=default`)           |
+| Karpenter spot launches    | EC2 → Spot Requests (active fleet requests)                               |
+| Karpenter launch templates | EC2 → Launch Templates (one per EC2NodeClass)                             |
 
 In Kubernetes both kinds appear together via `kubectl get nodes`. Distinguish by labels:
 ```bash
@@ -557,7 +568,7 @@ For production prefer `nodeAffinity` over `nodeSelector` — gives soft/hard pre
 
 `vpc`, `eks`, `karpenter`, `aws-lb-controller` are **thin local wrappers** around the community modules at https://github.com/terraform-aws-modules — battle-tested, prod-quality. The local module fixes project conventions (tags, naming, boundary attachment, region pinning, vendoring of charts); the upstream module does the heavy lifting (security groups, addons, IAM, edge cases).
 
-Custom-from-scratch is reserved for things that are simple enough to own (`iam-state`, `s3-state`, `bastion`, `acm`, `helm-release`).
+Custom-from-scratch is reserved for things that are simple enough to own (`iam-state`, `s3-state`, `bastion`, `helm-release`).
 
 ---
 
@@ -596,7 +607,7 @@ For long-term, switch to alternative charts (NGINX Inc, custom) or self-hosted i
 
 - **Karpenter chart vendored locally**. The chart `oci://public.ecr.aws/karpenter/karpenter` is pre-pulled into `modules/karpenter/charts/karpenter-<version>.tgz` and committed. Done because `helm provider v3` re-authenticates against OCI on every `plan`, and the auth token (TTL 12h from `data.aws_ecrpublic_authorization_token`) frequently fails with `403 expired` on subsequent applies. To bump the chart version: `helm pull oci://public.ecr.aws/karpenter/karpenter --version <X.Y.Z> --destination modules/karpenter/charts/`, update `var.karpenter_chart_version`, commit. Runtime image pulls (`public.ecr.aws/karpenter/controller`) are anonymous and unaffected. Tracked at https://github.com/hashicorp/terraform-provider-helm
 - **Cross-account DNS automation**. The authoritative zone (`example.com`) is in a different AWS account from where the workload runs. Currently the operator manually adds CNAMEs. Two options to automate: (a) cross-account IAM trust — give this account a role in the DNS account that lets it `route53:ChangeResourceRecordSets` on `*.poc.example.com`; deploy `external-dns` here pointing at that role. (b) `external-dns` running in DNS account, watching the workload account's resources via cross-account read of LB addresses. (a) is more idiomatic. Once done, drop `--resolve` from the test methodology and use `curl http://$HOST/` directly.
-- **HTTPS / ACM cert + real domain**. The demo Ingress on nginx is **HTTP-only**. ACM DNS-validation requires the cert's domain to be delegated to a Route53 zone in this AWS account; in the original POC neither candidate domain qualified (corp parent zone wasn't delegate-able; the personal alternative lived in a different AWS account). To enable HTTPS for prod: either (a) cross-account delegate a subdomain to this account's Route53 (NS records pointing at this account's nameservers), then re-enable `persistent/acm` and add the HTTPS listener back to `nginx/terragrunt.hcl`, or (b) provision the cert externally and import via `aws_acm_certificate.import_*`. `modules/acm/` is already written and reusable.
+- **HTTPS / ACM cert + real domain**. The demo Ingress on nginx is **HTTP-only**. ACM DNS-validation requires the cert's domain to be delegated to a Route53 zone in this AWS account; in the original POC neither candidate domain qualified (corp parent zone wasn't delegate-able; the personal alternative lived in a different AWS account). To enable HTTPS for prod: either (a) cross-account delegate a subdomain to this account's Route53 (NS records pointing at this account's nameservers), add a `persistent/acm` unit that issues a wildcard cert via DNS validation, and add the HTTPS listener back to `nginx/terragrunt.hcl`; or (b) provision the cert externally and import via `aws_acm_certificate.import_*`.
 - Bumping bootstrap node group `min_size`/`desired_size` after first apply requires a manual `aws eks update-nodegroup-config` because the upstream module (`terraform-aws-modules/eks/aws`) `ignore_changes = [scaling_config[0].desired_size]` on the managed NG. Workflow: AWS CLI to raise desired, then `terragrunt apply` for min/max. Document or wrap this in a small helper if it becomes routine.
 - **Bastion SSM agent registration**. After `persistent/bastion` apply the SSM agent stays `Offline` (PingStatus empty). Reboot did not help. cloud-init initially failed on a `dnf -y update` curl/curl-minimal conflict — fixed in the script, but the agent never registered even on the rebuilt instance. Investigate: AL2023-arm64 AMI agent state, IMDSv2 + SG egress to `ssm.<region>.amazonaws.com` / `ec2messages.<region>` / `ssmmessages.<region>` (we allow all egress so should be fine), `sudo systemctl status amazon-ssm-agent` once we have any other path in. Workaround until fixed: SSH key access (would need to add `key_name` to the EC2 resource) or AWS Systems Manager → Fleet Manager remote shell from console.
 - `workload/external-dns` (optional — auto-creates Route53 records for Service/Ingress). Limited utility while DNS is in another account; would need cross-account write permissions.
