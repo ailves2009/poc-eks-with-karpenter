@@ -121,6 +121,7 @@ data "aws_iam_policy_document" "iam_management" {
         "eks.amazonaws.com",
         "ec2.amazonaws.com",
         "elasticloadbalancing.amazonaws.com",
+        "pods.eks.amazonaws.com", # EKS Pod Identity associations (VPC CNI, etc.)
       ]
     }
   }
@@ -151,6 +152,8 @@ data "aws_iam_policy_document" "iam_management" {
       "iam:DetachRolePolicy",
       "iam:TagRole",
       "iam:UntagRole",
+      "iam:PutRolePermissionsBoundary",
+      "iam:DeleteRolePermissionsBoundary",
     ]
     resources = ["arn:aws:iam::${var.account}:role/*"]
   }

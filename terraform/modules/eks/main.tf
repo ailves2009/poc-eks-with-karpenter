@@ -31,10 +31,17 @@ module "eks" {
   iam_role_permissions_boundary = var.permissions_boundary_arn
 
   cluster_addons = {
-    coredns                = {}
-    kube-proxy             = {}
-    vpc-cni                = { before_compute = true } # install before nodes join
-    eks-pod-identity-agent = {}
+    coredns    = { most_recent = true }
+    kube-proxy = { most_recent = true }
+    vpc-cni = {
+      before_compute = true # install before nodes join
+      most_recent    = true
+      pod_identity_association = [{
+        role_arn        = aws_iam_role.vpc_cni.arn
+        service_account = "aws-node"
+      }]
+    }
+    eks-pod-identity-agent = { most_recent = true }
     # aws-ebs-csi-driver: requires an IRSA role / Pod Identity Association
     # to authenticate the controller. Add back together with that wiring when
     # PersistentVolumes become a requirement.
@@ -72,4 +79,28 @@ module "eks" {
   }
 
   tags = var.tags
+}
+
+# Pod Identity role for VPC CNI — replaces CNI permissions on the node IAM role.
+# Trust principal `pods.eks.amazonaws.com` is what the Pod Identity Agent uses
+# to vend short-lived credentials to the aws-node DaemonSet.
+resource "aws_iam_role" "vpc_cni" {
+  name                 = "vpc-cni-${var.cluster_name}"
+  permissions_boundary = var.permissions_boundary_arn
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "pods.eks.amazonaws.com" }
+      Action    = ["sts:AssumeRole", "sts:TagSession"]
+    }]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "vpc_cni" {
+  role       = aws_iam_role.vpc_cni.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }

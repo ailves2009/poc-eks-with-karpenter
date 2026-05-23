@@ -192,6 +192,21 @@ resource "aws_iam_role" "example" {
 }
 ```
 
+### Pod-to-AWS authentication
+
+Three mechanisms coexist in the cluster, picked by what the workload is:
+
+| Workload | Mechanism | Where wired |
+|---|---|---|
+| `aws-node` (VPC CNI) | **EKS Pod Identity** — dedicated role `vpc-cni-<cluster>`, `pods.eks.amazonaws.com` trust | `vpc-cni` addon `pod_identity_association` in [modules/eks/main.tf](modules/eks/main.tf) |
+| Karpenter controller | **IRSA** — OIDC trust on EKS cluster | [modules/karpenter/main.tf](modules/karpenter/main.tf) |
+| AWS Load Balancer Controller | **IRSA** | [modules/aws-lb-controller/main.tf](modules/aws-lb-controller/main.tf) |
+| Karpenter-launched nodes | node IAM role (worker policies) | upstream `terraform-aws-modules/eks/aws//modules/karpenter` |
+
+Pod Identity Agent (`eks-pod-identity-agent` addon) is installed and ready to serve any additional associations — e.g. `aws-ebs-csi-driver` when PVs are added. New CNI mechanism keeps `AmazonEKS_CNI_Policy` off the node IAM role: a pod compromised on a node cannot pull CNI credentials through IMDS.
+
+> **Cleanup TODO**: the upstream EKS / Karpenter modules still attach `AmazonEKS_CNI_Policy` to node roles by default. Remove via `node_iam_role_attach_cni_policy = false` once Pod Identity is verified in prod — see [TODO](#todo).
+
 ---
 
 ## Prerequisites
@@ -611,7 +626,8 @@ For long-term, switch to alternative charts (NGINX Inc, custom) or self-hosted i
 - Bumping bootstrap node group `min_size`/`desired_size` after first apply requires a manual `aws eks update-nodegroup-config` because the upstream module (`terraform-aws-modules/eks/aws`) `ignore_changes = [scaling_config[0].desired_size]` on the managed NG. Workflow: AWS CLI to raise desired, then `terragrunt apply` for min/max. Document or wrap this in a small helper if it becomes routine.
 - **Bastion SSM agent registration**. After `persistent/bastion` apply the SSM agent stays `Offline` (PingStatus empty). Reboot did not help. cloud-init initially failed on a `dnf -y update` curl/curl-minimal conflict — fixed in the script, but the agent never registered even on the rebuilt instance. Investigate: AL2023-arm64 AMI agent state, IMDSv2 + SG egress to `ssm.<region>.amazonaws.com` / `ec2messages.<region>` / `ssmmessages.<region>` (we allow all egress so should be fine), `sudo systemctl status amazon-ssm-agent` once we have any other path in. Workaround until fixed: SSH key access (would need to add `key_name` to the EC2 resource) or AWS Systems Manager → Fleet Manager remote shell from console.
 - `workload/external-dns` (optional — auto-creates Route53 records for Service/Ingress). Limited utility while DNS is in another account; would need cross-account write permissions.
-- `aws-ebs-csi-driver` EKS addon (currently disabled — requires IRSA role / Pod Identity Association for the controller pod). Add when PersistentVolumes are needed.
+- `aws-ebs-csi-driver` EKS addon (currently disabled — requires IRSA role / Pod Identity Association for the controller pod). Add when PersistentVolumes are needed. Pattern: same as VPC CNI (dedicated role + `pod_identity_association` on the addon).
+- **Remove `AmazonEKS_CNI_Policy` from node IAM roles** now that VPC CNI uses Pod Identity. Currently the policy is still attached on the bootstrap node group (upstream module default) and on the Karpenter node role (`node_iam_role_attach_cni_policy = true` in [modules/karpenter/main.tf](modules/karpenter/main.tf)). Until removed, CNI gets credentials from two sources — Pod Identity works, but the security win (no CNI permissions reachable via IMDS from a compromised pod) is not realized. Sequence: confirm Pod Identity is healthy → flip the flag to `false` → apply → spot-check that `aws-node` still works.
 - VPC peering between bastion VPC (default) and workload VPC, so VPN clients can reach EKS workers.
 - Switch EKS endpoint to private-only after VPN is validated.
 - **Migrate bootstrap state from local backend to S3** after deploy stabilizes. Currently `bootstrap/iam-state` and `bootstrap/s3-state` use `backend "local"` — state lives inside `.terragrunt-cache/...` and is destroyed by any `rm -rf .terragrunt-cache`. Migration steps: drop the `generate "backend"` block, add `include "root"` (inherits S3 backend), run `terragrunt init -migrate-state`. Until done: **never** delete `.terragrunt-cache` inside `bootstrap/`.

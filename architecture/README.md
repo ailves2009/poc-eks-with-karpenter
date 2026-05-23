@@ -278,18 +278,18 @@ Within each VPC, three AZs (`us-east-1a/b/c`) and three subnet tiers per AZ:
 ```
 EKS cluster (latest minor, e.g. 1.32)
 │
-├── Managed Node Group "system" (always on)
+├── Managed Node Group "bootstrap" (always on)
 │   ├── 2× t4g.medium (Graviton arm64), Multi-AZ
 │   ├── Hosts: Karpenter controller, CoreDNS, kube-proxy, AWS LB Controller,
 │   │          metrics-server, Argo CD, ExternalDNS, cert-manager
 │   └── Tainted so app workloads don't co-tenant
 │
 └── Karpenter NodePools (elastic, Spot-first)
-    ├── "general" — c/m/r families, 2-16 vCPU, amd64+arm64, Spot+on-demand fallback
+    ├── "default" — c/m/r families, 2-16 vCPU, amd64+arm64, Spot+on-demand fallback
     └── "batch"   — burstable, Spot-only, taint=batch (background jobs, cron)
 ```
 
-The system NG hosts critical add-ons that *must* run before Karpenter can — bootstrapping order matters. Everything else (the Flask API, workers, future services) runs on Karpenter-launched nodes.
+The `bootstrap` NG hosts the critical add-ons that have to be running before Karpenter can provision anything else — Karpenter itself, plus the controllers it depends on (CoreDNS for DNS, kube-proxy and aws-node for networking, AWS LB Controller for Ingress reconciliation). Everything else — the Flask API, workers, future services — runs on Karpenter-launched nodes from the `default` or `batch` pool.
 
 This is the **same pattern proven in the [Terraform POC](../terraform/)** — the production cluster is the POC, hardened.
 

@@ -91,8 +91,8 @@ inputs = {
       repository = "bitnamilegacy/nginx"
     }
 
-    # ClusterIP — Ingress is the public entrypoint; Service is just the
-    # in-cluster target the ALB routes to.
+    # ClusterIP — Ingress is the public entrypoint; 
+    # Service is just the in-cluster target the ALB routes to.
     service = {
       type = "ClusterIP"
     }

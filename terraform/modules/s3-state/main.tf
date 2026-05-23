@@ -16,6 +16,10 @@ resource "aws_s3_bucket_versioning" "state_s3" {
   }
 }
 
+# We use Customer Managed KMS because Terraform state bucket is accessed by deploy_role_arn which may belong to a different AWS account. 
+# AWS Managed keys do not support cross-account access. 
+# Additionally, CMK gives us full control over key policy, rotation, and a full CloudTrail audit of every decrypt operation on the state file.
+
 resource "aws_kms_key" "this" {
   description             = "This key is used to encrypt bucket objects"
   deletion_window_in_days = 10

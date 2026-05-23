@@ -3,6 +3,45 @@
 Reverse-chronological log of structural / behavioural changes. Bug fixes that
 don't change behaviour aren't listed unless they shaped the design.
 
+## 0.1.2 — VPC CNI on EKS Pod Identity
+
+### Changed
+
+- **`vpc-cni` addon now authenticates via EKS Pod Identity** instead of
+  inheriting permissions from the node IAM role. A dedicated IAM role
+  `vpc-cni-<cluster>` is created in `modules/eks` with trust on
+  `pods.eks.amazonaws.com` and `AmazonEKS_CNI_Policy` attached, then bound
+  to the `aws-node` ServiceAccount via the addon's `pod_identity_association`.
+  Reduces blast radius: a pod compromised on a node can no longer obtain
+  CNI credentials through IMDS (once `AmazonEKS_CNI_Policy` is removed from
+  the node role — see [README → TODO](README.md#todo)).
+- **All EKS addons set to `most_recent = true`** (`coredns`, `kube-proxy`,
+  `vpc-cni`, `eks-pod-identity-agent`). AWS auto-selects the latest
+  compatible version on apply. Appropriate for POC; for prod, pin
+  `addon_version` explicitly and update on a controlled cadence.
+
+### Added to cicd policy ([modules/iam-state](modules/iam-state))
+
+Gaps discovered during the Pod Identity rollout:
+
+- `iam:PutRolePermissionsBoundary` / `iam:DeleteRolePermissionsBoundary` in
+  `IamModifyRoles` — needed to set the boundary on roles the upstream EKS
+  module manages.
+- `pods.eks.amazonaws.com` added to `IamPassRoleToAwsServices` condition —
+  needed for EKS `UpdateAddon` to wire Pod Identity associations.
+
+The `cicd-boundary` policy still **denies** `iam:PutRolePermissionsBoundary` on
+the bounded roles themselves (anti-escalation), so the new permissions only
+broaden what CI/CD can manage, not what individual managed roles can do.
+
+### Known follow-ups
+
+- `AmazonEKS_CNI_Policy` is still attached to the bootstrap node group role
+  (upstream default) and to the Karpenter node role
+  (`node_iam_role_attach_cni_policy = true`). Pod Identity works, but the
+  least-privilege benefit on the node side is not realized until those
+  are flipped to `false`. Tracked in [README → TODO](README.md#todo).
+
 ## 0.1.1 — Submission prep
 
 ### Removed
