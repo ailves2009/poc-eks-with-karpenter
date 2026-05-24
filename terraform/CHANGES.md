@@ -42,7 +42,7 @@ broaden what CI/CD can manage, not what individual managed roles can do.
   least-privilege benefit on the node side is not realized until those
   are flipped to `false`. Tracked in [README → TODO](README.md#todo).
 
-## 0.1.1 — Submission prep
+## 0.1.1 — Repo cleanup
 
 ### Removed
 
@@ -53,9 +53,9 @@ broaden what CI/CD can manage, not what individual managed roles can do.
 
 ### Changed
 
-- Repo restructured: `terraform/` is now a subdirectory of the submission
-  root (`poc-task-for-opsfleet/{terraform,architecture}/`). Internal layout
-  of `terraform/` unchanged — all unit and module paths are the same.
+- Repo restructured: `terraform/` is now a sibling of `architecture/`
+  under the project root. Internal layout of `terraform/` unchanged —
+  all unit and module paths are the same.
 
 ## 0.1.0 — POC complete
 

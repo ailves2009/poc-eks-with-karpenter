@@ -261,7 +261,7 @@ Within each VPC, three AZs (`us-east-1a/b/c`) and three subnet tiers per AZ:
   - `sg-rds` ← `sg-app` :5432  *(this is the only path into the DB)*
 - **Network policies inside the cluster**: Cilium (or Calico) enforces namespace-level pod isolation. The `auth` namespace can talk to `database`, but `marketing` namespace cannot.
 - **Egress**: in non-prod, plain NAT. In prod, optional egress filtering (AWS Network Firewall) to allow-list outbound destinations once traffic patterns stabilize.
-- **No public IPs on workload nodes.** EKS nodes live in private subnets. SSH is gone — use SSM Session Manager, no bastion. (The Task 1 POC uses an OpenVPN bastion to demonstrate the cluster privately; in production we replace it with SSM-only.)
+- **No public IPs on workload nodes.** EKS nodes live in private subnets. SSH is gone — use SSM Session Manager, no bastion. (The companion [POC](../terraform/) uses an OpenVPN bastion to demonstrate the cluster privately; in production we replace it with SSM-only.)
 - **DNS**: Route 53 public zones in `shared-services`; private zones in each workload account, peered via shared VPC association.
 
 ---
