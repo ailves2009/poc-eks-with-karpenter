@@ -179,6 +179,10 @@ Both AWS and GCP can host this workload well. The choice is **AWS** for these sp
 
 None of these are likely in the 12-month horizon, so the choice is committed, not provisional.
 
+### IaC tooling
+
+**Terraform + Terragrunt** for everything — `bootstrap/`, `persistent/`, and `workload/` units in the [terraform/](../terraform/) POC. Crossplane was considered and deferred (see [§9](#9-key-trade-offs-and-what-id-revisit)); revisit in Phase 5+ as a hybrid layer (Terraform for platform, Crossplane for app-scoped resources) if a platform team emerges.
+
 ### AWS account topology
 
 **AWS Organization with Identity Center** as the access plane, organized into Organizational Units (OUs) and discrete accounts:
@@ -465,6 +469,7 @@ Each phase is **additive** — nothing built earlier needs to be torn down. That
 - **Service mesh deferred** — Istio/Linkerd not in v1. Adds operational weight; benefits (mTLS, traffic shaping) are achievable with VPC SGs + ALB + Argo Rollouts initially. Add when there are >10 services or strict zero-trust requirements.
 - **Network Firewall deferred** — same logic. Egress is allow-by-default in v1; tightened once outbound traffic patterns are stable.
 - **Single region in v1** — `us-east-1` only, with DR in `us-west-2`. Going active-active in two regions doubles complexity; do it when business value demands it (Phase 5).
+- **Crossplane vs Terraform** — sticking with Terraform + Terragrunt. Crossplane's K8s-native IaC, continuous reconciliation, and self-service Compositions are attractive, but premature at 5 engineers: it adds a second IaC stack (Terraform is still needed to seed the cluster Crossplane runs in), shifts state from versioned S3 into the cluster's etcd (operationally heavier to back up and audit), and its AWS provider still lags `hashicorp/aws` on Organizations / Identity Center / Control Tower features needed for the SOC 2 baseline. Drift handling also flips: Terraform surfaces drift for human review; Crossplane silently reverts manual changes, which can fight emergency `kubectl` / `aws cli` fixes. Realistic adoption path when a platform team emerges (~Phase 5+) is **hybrid** — Terraform for the platform layer (org, accounts, VPC, EKS, IAM, RDS), Crossplane for app-scoped, frequently-changing resources (S3 buckets, Secrets, SQS queues) exposed to product teams via Compositions in GitOps — not a full migration.
 
 ---
 
