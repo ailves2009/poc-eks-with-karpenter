@@ -10,7 +10,7 @@
 
 ## Co-author
 
-**Alexey Ilves**
+**Alexey Ilves** - [@AlexeyIlves](https://github.com/AlexeyIlves)
 
 - QA — testing methodology and quality assurance
 - Frontend development
