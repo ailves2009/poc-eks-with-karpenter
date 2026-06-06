@@ -8,6 +8,13 @@
 - Terraform / Terragrunt implementation ([terraform/](terraform/))
 - End-to-end deploy walkthrough and testing methodology
 
+## Co-author
+
+**Alexey Ilves**
+
+- QA — testing methodology and quality assurance
+- Frontend development
+
 ## Contributing
 
 This repository is a portfolio / proof-of-concept project; it isn't currently
