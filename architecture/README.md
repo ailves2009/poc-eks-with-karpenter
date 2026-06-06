@@ -178,6 +178,7 @@ Both AWS and GCP can host this workload well. The choice is **AWS** for these sp
 - The team grows and a majority strongly prefers GCP-native ergonomics (Autopilot, simpler IAM).
 
 None of these are likely in the 12-month horizon, so the choice is committed, not provisional.
+This may require additional checks and QA activities.
 
 ### IaC tooling
 
